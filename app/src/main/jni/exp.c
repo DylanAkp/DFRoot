@@ -15,6 +15,7 @@
 #include <sys/utsname.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
+#include <android/log.h>
 #include "aes256.h"
 
 #define eos(s) (s + strlen(s))
@@ -370,12 +371,34 @@ static int patch_ko(void) {
     }
     printf("Using KMI: android%d-%d.%d\n",
              ko->android_release, ko->kver_major, ko->kver_minor);
+    __android_log_print(ANDROID_LOG_INFO, "dfroot-dbg", "ko_target=%s KMI=android%d-%d.%d len=%zu",
+                        libcxx_ko_target, ko->android_release, ko->kver_major, ko->kver_minor,
+                        (size_t)(ko->end - ko->start));
 
     size_t len;
     char *buf = pad16(ko->start, (size_t)(ko->end - ko->start), &len);
     if (!buf) { printf("patch: %s - pad16 alloc failed\n", libcxx_ko_target); return -1; }
     printf("patch: %s <- dfroot.ko (%zu bytes)\n", libcxx_ko_target, len);
     int ret = patch_file_cbc(libcxx_ko_target, buf, len, 0, 1);
+    if (ret == 0) {
+        size_t mismatches = 0;
+        for (size_t off = 0; off < len; off += 16) {
+            uint8_t v[16];
+            for (int attempt = 0; attempt < 5; attempt++) {
+                if (read_vendor_content((off_t)off, v) == 0 && memcmp(v, buf + off, 16) == 0)
+                    break;
+                if (attempt == 4) {
+                    if (mismatches < 5)
+                        __android_log_print(ANDROID_LOG_ERROR, "dfroot-dbg", "verify mismatch at 0x%zx", off);
+                    mismatches++;
+                    break;
+                }
+                __android_log_print(ANDROID_LOG_WARN, "dfroot-dbg", "retrying 0x%zx (attempt %d)", off, attempt + 1);
+                patch_file_cbc(libcxx_ko_target, buf + off, 16, off, 1);
+            }
+        }
+        __android_log_print(ANDROID_LOG_INFO, "dfroot-dbg", "verify mismatches=%zu/%zu", mismatches, len / 16);
+    }
     free(buf);
     if (ret) printf("patch: %s patch failed: %d\n", libcxx_ko_target, ret);
     return ret;
